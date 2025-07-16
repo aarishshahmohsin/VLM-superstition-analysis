@@ -7,4 +7,6 @@ pandas
 numpy
 Pillow
 seaborn
+kaggle
 git+https://github.com/openai/CLIP.git
+huggingface_hub
