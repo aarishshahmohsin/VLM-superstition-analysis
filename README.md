@@ -136,4 +136,4 @@ If you use this project for your research, please consider citing or linking bac
 
 ---
 
-Let me know if you'd like me to help zip the full repo for upload or write a `setup.py` or Jupyter notebook version as well.
+
