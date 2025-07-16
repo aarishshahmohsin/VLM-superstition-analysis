@@ -1,40 +1,31 @@
-
-# Superstition Dataset CLIP Analysis and Fine-tuning Pipeline (Hugging Face model + Kaggle dataset)
+# main.py
 
 import os
-import argparse
-from scripts import dataset_processing, clip_inference, fine_tuning, visualize
 
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description="Superstition CLIP Model Pipeline")
-    parser.add_argument('--mode', type=str, required=True, choices=['infer', 'finetune', 'evaluate', 'visualize'],
-                        help='Mode to run: infer | finetune | evaluate | visualize')
-    parser.add_argument('--model', type=str, default='ViT-B/32', help='CLIP model variant')
-    parser.add_argument('--dataset', type=str, default='/kaggle/input/superstition-dataset/Big Data', help='Path to dataset root')
-    parser.add_argument('--model_path', type=str, default='https://huggingface.co/Mohammad121/Finetuned_CLIP-32_no_superstition/resolve/main/fine_tuned_model.pt', 
-                        help='Hugging Face path to fine-tuned model')
-    parser.add_argument('--csv', type=str, default='output/clip_superstition_dataset.csv', help='Path to output CSV')
-    parser.add_argument('--save_dir', type=str, default='output/', help='Output save directory')
+if __name__ == "__main__":
+    print("🚀 Starting Superstition Bias CLIP Pipeline")
 
-    args = parser.parse_args()
+    # STEP 1: Download and extract dataset (if using Kaggle or external source)
+    # For example, if using KaggleHub (adjust if dataset is already available):
+    # from data_download import download_dataset
+    # download_dataset()
 
-    os.makedirs(args.save_dir, exist_ok=True)
+    # STEP 2: Run Zero-Shot Evaluation with ViT-B/32
+    os.system("python run_vit_b32_zeroshot.py")
 
-    if args.mode == 'infer':
-        clip_inference.run_inference(args.dataset, args.model, args.save_dir)
+    # STEP 3: Run Zero-Shot Evaluation with ViT-L/14
+    os.system("python run_vit_l14_zeroshot.py")
 
-    elif args.mode == 'finetune':
-        fine_tuning.run_kfold_training(
-            csv_path=args.csv,
-            model_name=args.model,
-            save_path=args.save_dir
-        )
+    # STEP 4: Create dataset for fine-tuning
+    os.system("python create_finetune_dataset.py")
 
-    elif args.mode == 'evaluate':
-        clip_inference.run_finetuned_evaluation(args.dataset, args.model_path, args.save_dir)
+    # STEP 5: Fine-tune CLIP using the created dataset
+    os.system("python finetune_clip.py")
 
-    elif args.mode == 'visualize':
-        visualize.run_visualization()
+    # STEP 6: Evaluate Fine-Tuned model
+    os.system("python run_finetuned_clip.py")
 
-    else:
-        print("Invalid mode.")
+    # STEP 7: Visualization and value count comparison
+    os.system("python visualize_results.py")
+
+    print("\n✅ All stages completed successfully.")
