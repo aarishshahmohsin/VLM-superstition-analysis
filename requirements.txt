@@ -1,0 +1,10 @@
+torch
+ftfy
+regex
+tqdm
+matplotlib
+pandas
+numpy
+Pillow
+seaborn
+git+https://github.com/openai/CLIP.git
