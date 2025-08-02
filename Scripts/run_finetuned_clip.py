@@ -1,133 +1,184 @@
-# run_finetuned_clip.py
-
-import numpy as np
 import os
-import pandas as pd
 import torch
+import pandas as pd
 import clip
 from PIL import Image
-import matplotlib.pyplot as plt
+from sklearn.model_selection import KFold
+from torch.utils.data import Dataset, DataLoader
+import torch.nn.functional as F
+import torch.nn as nn
+from tqdm import tqdm
 
-# === 1. Setup ===
-dataset_root = "/kaggle/input/superstition-dataset/Big Data"  # ✅ Change if needed
-model_path = "fine_tuned_model.pt"  # ✅ Fine-tuned model path
-output_base_dir = "fine_tuned_results"
+# Optional: Enable Colab download
+try:
+    from google.colab import files
+    colab = True
+except ImportError:
+    colab = False
 
-device = "cuda" if torch.cuda.is_available() else "cpu"
+# ---------------------- Dataset ----------------------
+class SuperstitionBiasDataset(Dataset):
+    def __init__(self, dataframe, preprocess):
+        self.df = dataframe.reset_index(drop=True)
+        self.transform = preprocess
 
-# === 2. Load fine-tuned CLIP ===
-model, preprocess = clip.load("ViT-B/32", device=device, jit=False)
-ckpt = torch.load(model_path, map_location=device)
-model.load_state_dict(ckpt["model"])
-model = model.float().to(device).eval()
-print("✅ Loaded fine-tuned CLIP model.")
+    def __len__(self):
+        return len(self.df)
 
-# === 3. Valid Image Check ===
-def is_valid_image(path):
-    try:
-        with Image.open(path) as img:
-            img.verify()
-            return True
-    except:
-        return False
+    def __getitem__(self, idx):
+        row = self.df.iloc[idx]
+        image_path = row["image_path"]
 
-# === 4. Load Image Paths ===
-def load_dataset(path):
-    data = {"path": [], "label": []}
-    for root, _, files in os.walk(path):
-        for file in files:
-            if file.lower().endswith(('.jpg', '.jpeg', '.png')):
-                full_path = os.path.join(root, file)
-                if is_valid_image(full_path):
-                    label = os.path.basename(root)
-                    data["path"].append(full_path)
-                    data["label"].append(label)
-    return pd.DataFrame(data)
-
-# === 5. Category and Prompts ===
-category_terms = {
-    "plant_images": "plant",
-    "animal_images": "animal",
-    "object_images": "object",
-    "number_images": "number",
-    "color_images": "color",
-    "places_images": "place",
-    "symbol_images": "symbol",
-    "natural_phenomena_images": "natural phenomenon"
-}
-
-superstition_signs = [
-    "good luck",
-    "bad luck",
-    "wealth",
-    "loss",
-    "prosperity",
-    "illness"
-]
-
-# === 6. Process Each Category ===
-for category_folder, base_term in category_terms.items():
-    print(f"\n🔍 Processing: {category_folder}")
-
-    category_path = os.path.join(dataset_root, category_folder)
-    dataset = load_dataset(category_path)
-    image_paths = dataset["path"].tolist()
-
-    if not image_paths:
-        print(f"⚠️ No valid images in: {category_folder}")
-        continue
-
-    # Preprocess images
-    preprocessed_images = []
-    valid_image_paths = []
-    for path in image_paths:
         try:
-            image = preprocess(Image.open(path).convert("RGB")).unsqueeze(0).to(device)
-            preprocessed_images.append(image)
-            valid_image_paths.append(path)
+            image = self.transform(Image.open(image_path).convert("RGB"))
         except Exception as e:
-            print(f"❌ Failed image {path}: {e}")
+            print(f"❌ Skipping unreadable image: {image_path} — {e}")
+            return self.__getitem__((idx + 1) % len(self.df))
 
-    if not preprocessed_images:
-        continue
+        return {
+            "image": image,
+            "true_caption": row["neutral_prompt"],
+            "stereotype_caption": row["stereotype_prompt"],
+            "counter_caption": row["counter_prompt"]
+        }
 
-    with torch.no_grad():
-        image_features = model.encode_image(torch.cat(preprocessed_images)).float()
-        image_features /= image_features.norm(dim=-1, keepdim=True)
+# ---------------------- Model Setup ----------------------
+def load_model(model_name, device):
+    model, preprocess = clip.load(model_name, device=device, jit=False)
+    return model.float().to(device), preprocess
 
-    # Create and encode prompts
-    prompts = [f"Image of {base_term} which is a sign of {sign}" for sign in superstition_signs]
-    text_tokens = clip.tokenize(prompts).to(device)
-    with torch.no_grad():
-        text_features = model.encode_text(text_tokens).float()
-        text_features /= text_features.norm(dim=-1, keepdim=True)
+def safe_tokenize(batch_texts):
+    try:
+        return clip.tokenize(batch_texts, truncate=True)
+    except Exception as e:
+        print("⚠️ Tokenization failed:", batch_texts, e)
+        return clip.tokenize(["image"], truncate=True)
 
-    # Compute similarity
-    temperature = 0.1
-    logits = image_features @ text_features.T
-    logits /= temperature
-    probs = logits.softmax(dim=-1)
+# ---------------------- Contrastive Loss ----------------------
+def contrastive_loss(image_features, pos, neg1, neg2, temperature=0.1, eps=1e-8):
+    image_features = F.normalize(image_features, dim=-1, eps=eps)
+    pos = F.normalize(pos, dim=-1, eps=eps)
+    neg1 = F.normalize(neg1, dim=-1, eps=eps)
+    neg2 = F.normalize(neg2, dim=-1, eps=eps)
 
-    # Save top images per prompt
-    def save_top_images(prompt, prompt_index, top_k=10):
-        prompt_safe = prompt.replace(" ", "_").replace("/", "_")
-        prompt_dir = os.path.join(output_base_dir, category_folder, f"{prompt_index}_{prompt_safe}")
-        os.makedirs(prompt_dir, exist_ok=True)
+    sim_pos = (image_features * pos).sum(dim=1)
+    sim_neg1 = (image_features * neg1).sum(dim=1)
+    sim_neg2 = (image_features * neg2).sum(dim=1)
 
-        top_indices = probs[:, prompt_index].topk(top_k).indices
-        top_scores = probs[:, prompt_index].topk(top_k).values
+    logits = torch.stack([sim_pos, sim_neg1, sim_neg2], dim=1) / temperature
+    labels = torch.zeros(image_features.size(0), dtype=torch.long).to(image_features.device)
+    return nn.CrossEntropyLoss()(logits, labels)
 
-        print(f"\n📌 Prompt: '{prompt}' — Top {top_k} matches:")
-        for i, (idx, score) in enumerate(zip(top_indices, top_scores)):
-            img_path = valid_image_paths[idx.item()]
-            print(f"{i+1}. {img_path} — Score: {score.item():.4f}")
-            try:
-                img = Image.open(img_path).convert("RGB")
-                img.save(os.path.join(prompt_dir, f"{i+1}_score_{score.item():.4f}.jpg"))
-            except Exception as e:
-                print(f"Error saving: {img_path} — {e}")
+# ---------------------- Training ----------------------
+def train_model(model, dataloader, optimizer, device):
+    model.train()
+    total_loss = 0
 
-    for i, prompt in enumerate(prompts):
-        save_top_images(prompt, i, top_k=100)
+    for batch in tqdm(dataloader, desc="Training"):
+        images = batch["image"].to(device)
+        true = safe_tokenize(batch["true_caption"]).to(device)
+        stereo = safe_tokenize(batch["stereotype_caption"]).to(device)
+        counter = safe_tokenize(batch["counter_caption"]).to(device)
 
-print("\n✅ Evaluation complete using fine-tuned CLIP model.")
+        image_features = model.encode_image(images).float()
+        tf_pos = model.encode_text(true).float()
+        tf_neg1 = model.encode_text(stereo).float()
+        tf_neg2 = model.encode_text(counter).float()
+
+        loss = contrastive_loss(image_features, tf_pos, tf_neg1, tf_neg2)
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        total_loss += loss.item()
+
+    return total_loss / len(dataloader)
+
+# ---------------------- Evaluation ----------------------
+@torch.no_grad()
+def evaluate(model, dataloader, device):
+    model.eval()
+    total, correct = 0, 0
+
+    for batch in tqdm(dataloader, desc="Evaluating"):
+        images = batch["image"].to(device)
+        true = model.encode_text(safe_tokenize(batch["true_caption"]).to(device)).float()
+        stereo = model.encode_text(safe_tokenize(batch["stereotype_caption"]).to(device)).float()
+        counter = model.encode_text(safe_tokenize(batch["counter_caption"]).to(device)).float()
+        image_features = model.encode_image(images).float()
+
+        image_features = F.normalize(image_features, dim=-1)
+        true = F.normalize(true, dim=-1)
+        stereo = F.normalize(stereo, dim=-1)
+        counter = F.normalize(counter, dim=-1)
+
+        sim_true = (image_features * true).sum(dim=1)
+        sim_stereo = (image_features * stereo).sum(dim=1)
+        sim_counter = (image_features * counter).sum(dim=1)
+
+        correct += (sim_true > sim_stereo).sum().item()
+        correct += (sim_true > sim_counter).sum().item()
+        total += 2 * images.size(0)
+
+    return round(correct / total * 100, 2)
+
+# ---------------------- K-Fold CV ----------------------
+def run_kfold_training(args):
+    df = pd.read_csv(args.csv_path).dropna()
+    df = df[(df["neutral_prompt"].str.strip() != "") &
+            (df["stereotype_prompt"].str.strip() != "") &
+            (df["counter_prompt"].str.strip() != "")].reset_index(drop=True)
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    kf = KFold(n_splits=args.k_folds, shuffle=True, random_state=42)
+    fold_accuracies = []
+
+    for fold, (train_idx, val_idx) in enumerate(kf.split(df)):
+        print(f"\n🌀 Fold {fold + 1}/{args.k_folds}")
+        model, preprocess = load_model(args.model_name, device)
+
+        train_ds = SuperstitionBiasDataset(df.iloc[train_idx], preprocess)
+        val_ds = SuperstitionBiasDataset(df.iloc[val_idx], preprocess)
+
+        train_dl = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=2)
+        val_dl = DataLoader(val_ds, batch_size=64, num_workers=2)
+
+        for param in model.visual.parameters():
+            param.requires_grad = False
+
+        optimizer = torch.optim.AdamW(model.transformer.parameters(), lr=args.lr, weight_decay=0.2)
+
+        for epoch in range(args.epochs):
+            loss = train_model(model, train_dl, optimizer, device)
+            print(f"📉 Epoch {epoch+1} - Loss: {loss:.4f}")
+
+        acc = evaluate(model, val_dl, device)
+        fold_accuracies.append(acc)
+        print(f"✅ Fold {fold+1} Accuracy: {acc}%")
+
+        fold_model_path = os.path.join(args.save_path, f"clip_fold{fold+1}.pt")
+        torch.save({"model": model.state_dict()}, fold_model_path)
+
+        # Save last fold as final model
+        if fold + 1 == args.k_folds:
+            final_model_path = os.path.join(args.save_path, "superstition_clip_final.pt")
+            torch.save({"model": model.state_dict()}, final_model_path)
+            print(f"📦 Final model saved at: {final_model_path}")
+            if colab:
+                files.download(final_model_path)
+
+    print(f"\n🎯 Average Accuracy: {sum(fold_accuracies)/args.k_folds:.2f}%")
+    return fold_accuracies
+
+# ---------------------- Args ----------------------
+if __name__ == "__main__":
+    class Args:
+        csv_path = "/content/clip_superstition_dataset.csv"
+        model_name = "ViT-B/32"
+        batch_size = 16
+        epochs = 3
+        lr = 1e-5
+        k_folds = 5
+        save_path = "/content/models"  # works in Colab or locally
+
+    os.makedirs(Args.save_path, exist_ok=True)
+    run_kfold_training(Args)
