@@ -1,21 +1,43 @@
+# V-32
 
-
+import numpy as np
 import os
+import pandas as pd
 import torch
 import clip
-import pandas as pd
 from PIL import Image
+import matplotlib.pyplot as plt
 
-# Path setup
-dataset_root = "data/superstition-dataset/Big Data"
-output_base_dir = "parsed_results/V32"
-os.makedirs(output_base_dir, exist_ok=True)
+# Dataset root path
+dataset_root = "/kaggle/input/superstition-dataset/Big Data"
 
-# Load model
+# Load the CLIP model
 device = "cuda" if torch.cuda.is_available() else "cpu"
 model, preprocess = clip.load("ViT-B/32", device=device)
 
-# Define superstition categories
+# Verify valid images
+def is_valid_image(path):
+    try:
+        with Image.open(path) as img:
+            img.verify()
+            return True
+    except:
+        return False
+
+# Load dataset for a single category
+def load_dataset(path):
+    data = {"path": [], "label": []}
+    for root, dirs, files in os.walk(path):
+        for file in files:
+            if file.lower().endswith(('.jpg', '.jpeg', '.png')):
+                full_path = os.path.join(root, file)
+                if is_valid_image(full_path):
+                    label = os.path.basename(root)
+                    data["path"].append(full_path)
+                    data["label"].append(label)
+    return pd.DataFrame(data)
+
+# Define categories and prompt base terms
 category_terms = {
     "plant_images": "plant",
     "animal_images": "animal",
@@ -28,75 +50,95 @@ category_terms = {
 }
 
 superstition_signs = [
-    "good luck", "bad luck", "wealth", "loss", "prosperity", "illness"
+    "good luck",
+    "bad luck",
+    "wealth",
+    "loss",
+    "prosperity",
+    "illness"
 ]
 
-# Helper: Validate image
+# Output directory
+output_base_dir = "/kaggle/working/CLIP_results"
 
-def is_valid_image(path):
-    try:
-        with Image.open(path) as img:
-            img.verify()
-            return True
-    except:
-        return False
-
-# Helper: Load images
-
-def load_dataset(path):
-    data = {"path": [], "label": []}
-    for root, _, files in os.walk(path):
-        for file in files:
-            if file.lower().endswith((".jpg", ".jpeg", ".png")):
-                full_path = os.path.join(root, file)
-                if is_valid_image(full_path):
-                    label = os.path.basename(root)
-                    data["path"].append(full_path)
-                    data["label"].append(label)
-    return pd.DataFrame(data)
-
-# Main inference loop
+# Process each category one by one
 for category_folder, base_term in category_terms.items():
-    print(f"\n🔍 Evaluating category: {category_folder}")
+    print(f"\n🔍 Now processing category: {category_folder}")
+
     category_path = os.path.join(dataset_root, category_folder)
-    df = load_dataset(category_path)
-    image_paths = df["path"].tolist()
+    dataset = load_dataset(category_path)
+
+    # Use only the first half of images from each label (subfolder)
+    subset_paths = []
+    for label in dataset["label"].unique():
+      label_df = dataset[dataset["label"] == label]
+      label_paths = label_df["path"].tolist()
+      half = len(label_paths) // 2
+      subset_paths.extend(label_paths[:half])
+
+    image_paths = subset_paths
 
     if not image_paths:
-        print(f"⚠️ No images in {category_folder}")
+        print(f"⚠️ No valid images found in: {category_folder}")
         continue
 
-    images, valid_paths = [], []
+    # Preprocess images
+    preprocessed_images = []
+    valid_image_paths = []
+
     for path in image_paths:
         try:
             image = preprocess(Image.open(path).convert("RGB")).unsqueeze(0).to(device)
-            images.append(image)
-            valid_paths.append(path)
-        except:
-            continue
+            preprocessed_images.append(image)
+            valid_image_paths.append(path)
+        except Exception as e:
+            print(f"❌ Error with image {path}: {e}")
 
+    if not preprocessed_images:
+        print(f"⚠️ No valid images to process in {category_folder}.")
+        continue
+
+    # Encode images
     with torch.no_grad():
-        image_features = model.encode_image(torch.cat(images)).float()
+        image_features = model.encode_image(torch.cat(preprocessed_images, dim=0))
         image_features /= image_features.norm(dim=-1, keepdim=True)
 
-    prompts = [f"Image of {base_term} which is a sign of {s}" for s in superstition_signs]
+    # Create prompts for this category
+    prompts = [f"Image of {base_term} which is a sign of {sign}" for sign in superstition_signs]
+
+    # Encode text prompts
     text_tokens = clip.tokenize(prompts).to(device)
     with torch.no_grad():
-        text_features = model.encode_text(text_tokens).float()
+        text_features = model.encode_text(text_tokens)
         text_features /= text_features.norm(dim=-1, keepdim=True)
 
+    # Compute similarity
+    temperature = 0.1
     logits = image_features @ text_features.T
-    probs = logits.softmax(dim=-1).cpu().numpy()
+    logits /= temperature
+    probs = logits.softmax(dim=-1)
 
-    # Save top 100 images per prompt
+    # Save top images per prompt
+    def save_top_images(prompt, prompt_index, top_k=10):
+        prompt_safe = prompt.replace(" ", "_").replace("/", "_")
+        prompt_dir = os.path.join(output_base_dir, category_folder, f"{prompt_index}_{prompt_safe}")
+        os.makedirs(prompt_dir, exist_ok=True)
+
+        top_indices = probs[:, prompt_index].topk(top_k).indices
+        top_scores = probs[:, prompt_index].topk(top_k).values
+
+        print(f"\n📌 Prompt: '{prompt}' — Top {top_k} matches:")
+        for i, (idx, score) in enumerate(zip(top_indices, top_scores)):
+            img_path = valid_image_paths[idx.item()]
+            print(f"{i+1}. {img_path} — Score: {score.item():.2f}")
+            try:
+                img = Image.open(img_path).convert("RGB")
+                img.save(os.path.join(prompt_dir, f"{i+1}_score_{score.item():.2f}.jpg"))
+            except Exception as e:
+                print(f"Error saving image {img_path}: {e}")
+
+    # Run saving per prompt
     for i, prompt in enumerate(prompts):
-        prompt_safe = prompt.replace(" ", "_")
-        topk = probs[:, i].argsort()[-100:][::-1]
+        save_top_images(prompt, i, top_k=50)
 
-        output_path = os.path.join(output_base_dir, f"{category_folder}_{i}_{prompt_safe}.txt")
-        with open(output_path, "w") as f:
-            f.write(f"📌 Prompt: '{prompt}'\n")
-            for rank, idx in enumerate(topk):
-                f.write(f"{rank+1}. {valid_paths[idx]} — Score: {probs[idx][i]:.4f}\n")
-
-    print(f"✅ Done with {category_folder}")
+print("\n✅ All categories processed successfully.")
