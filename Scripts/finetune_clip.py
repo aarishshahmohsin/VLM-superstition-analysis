@@ -9,6 +9,13 @@ import torch.nn.functional as F
 import torch.nn as nn
 from tqdm import tqdm
 
+# Optional: Enable Colab download
+try:
+    from google.colab import files
+    colab = True
+except ImportError:
+    colab = False
+
 # ---------------------- Dataset ----------------------
 class SuperstitionBiasDataset(Dataset):
     def __init__(self, dataframe, preprocess):
@@ -35,6 +42,18 @@ class SuperstitionBiasDataset(Dataset):
             "counter_caption": row["counter_prompt"]
         }
 
+# ---------------------- Model Setup ----------------------
+def load_model(model_name, device):
+    model, preprocess = clip.load(model_name, device=device, jit=False)
+    return model.float().to(device), preprocess
+
+def safe_tokenize(batch_texts):
+    try:
+        return clip.tokenize(batch_texts, truncate=True)
+    except Exception as e:
+        print("⚠️ Tokenization failed:", batch_texts, e)
+        return clip.tokenize(["image"], truncate=True)
+
 # ---------------------- Contrastive Loss ----------------------
 def contrastive_loss(image_features, pos, neg1, neg2, temperature=0.1, eps=1e-8):
     image_features = F.normalize(image_features, dim=-1, eps=eps)
@@ -50,15 +69,7 @@ def contrastive_loss(image_features, pos, neg1, neg2, temperature=0.1, eps=1e-8)
     labels = torch.zeros(image_features.size(0), dtype=torch.long).to(image_features.device)
     return nn.CrossEntropyLoss()(logits, labels)
 
-# ---------------------- Safe Tokenize ----------------------
-def safe_tokenize(batch_texts):
-    try:
-        return clip.tokenize(batch_texts, truncate=True)
-    except Exception as e:
-        print("⚠️ Tokenization failed:", batch_texts, e)
-        return clip.tokenize(["image"], truncate=True)
-
-# ---------------------- Train ----------------------
+# ---------------------- Training ----------------------
 def train_model(model, dataloader, optimizer, device):
     model.train()
     total_loss = 0
@@ -82,7 +93,7 @@ def train_model(model, dataloader, optimizer, device):
 
     return total_loss / len(dataloader)
 
-# ---------------------- Evaluate ----------------------
+# ---------------------- Evaluation ----------------------
 @torch.no_grad()
 def evaluate(model, dataloader, device):
     model.eval()
@@ -110,44 +121,33 @@ def evaluate(model, dataloader, device):
 
     return round(correct / total * 100, 2)
 
-# ---------------------- Main ----------------------
-def main():
-    class Args:
-        csv_path = "parsed_results/clip_superstition_dataset.csv"
-        model_name = "ViT-B/32"
-        batch_size = 16
-        epochs = 3
-        lr = 1e-5
-        k_folds = 5
-        save_path = "models"
-
-    os.makedirs(Args.save_path, exist_ok=True)
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-
-    df = pd.read_csv(Args.csv_path).dropna()
+# ---------------------- K-Fold CV ----------------------
+def run_kfold_training(args):
+    df = pd.read_csv(args.csv_path).dropna()
     df = df[(df["neutral_prompt"].str.strip() != "") &
             (df["stereotype_prompt"].str.strip() != "") &
             (df["counter_prompt"].str.strip() != "")].reset_index(drop=True)
 
-    kf = KFold(n_splits=Args.k_folds, shuffle=True, random_state=42)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    kf = KFold(n_splits=args.k_folds, shuffle=True, random_state=42)
     fold_accuracies = []
 
     for fold, (train_idx, val_idx) in enumerate(kf.split(df)):
-        print(f"\n🌀 Fold {fold + 1}/{Args.k_folds}")
-        model, preprocess = clip.load(Args.model_name, device=device, jit=False)
+        print(f"\n🌀 Fold {fold + 1}/{args.k_folds}")
+        model, preprocess = load_model(args.model_name, device)
 
         train_ds = SuperstitionBiasDataset(df.iloc[train_idx], preprocess)
         val_ds = SuperstitionBiasDataset(df.iloc[val_idx], preprocess)
 
-        train_dl = DataLoader(train_ds, batch_size=Args.batch_size, shuffle=True, num_workers=2)
+        train_dl = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=2)
         val_dl = DataLoader(val_ds, batch_size=64, num_workers=2)
 
         for param in model.visual.parameters():
             param.requires_grad = False
 
-        optimizer = torch.optim.AdamW(model.transformer.parameters(), lr=Args.lr, weight_decay=0.2)
+        optimizer = torch.optim.AdamW(model.transformer.parameters(), lr=args.lr, weight_decay=0.2)
 
-        for epoch in range(Args.epochs):
+        for epoch in range(args.epochs):
             loss = train_model(model, train_dl, optimizer, device)
             print(f"📉 Epoch {epoch+1} - Loss: {loss:.4f}")
 
@@ -155,15 +155,30 @@ def main():
         fold_accuracies.append(acc)
         print(f"✅ Fold {fold+1} Accuracy: {acc}%")
 
-        fold_model_path = os.path.join(Args.save_path, f"clip_fold{fold+1}.pt")
+        fold_model_path = os.path.join(args.save_path, f"clip_fold{fold+1}.pt")
         torch.save({"model": model.state_dict()}, fold_model_path)
 
-        if fold + 1 == Args.k_folds:
-            final_model_path = os.path.join(Args.save_path, "fine_tuned_model.pt")
+        # Save last fold as final model
+        if fold + 1 == args.k_folds:
+            final_model_path = os.path.join(args.save_path, "superstition_clip_final.pt")
             torch.save({"model": model.state_dict()}, final_model_path)
             print(f"📦 Final model saved at: {final_model_path}")
+            if colab:
+                files.download(final_model_path)
 
-    print(f"\n🎯 Average Accuracy: {sum(fold_accuracies)/Args.k_folds:.2f}%")
+    print(f"\n🎯 Average Accuracy: {sum(fold_accuracies)/args.k_folds:.2f}%")
+    return fold_accuracies
 
+# ---------------------- Args ----------------------
 if __name__ == "__main__":
-    main()
+    class Args:
+        csv_path = "/content/clip_superstition_dataset.csv"
+        model_name = "ViT-B/32"
+        batch_size = 16
+        epochs = 3
+        lr = 1e-5
+        k_folds = 5
+        save_path = "/content/models"  # works in Colab or locally
+
+    os.makedirs(Args.save_path, exist_ok=True)
+    run_kfold_training(Args)
