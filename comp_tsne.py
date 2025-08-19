@@ -7,8 +7,12 @@ import csv
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from sklearn.manifold import TSNE
+from sklearn.decomposition import PCA
+import seaborn as sns
 
-# Device
+
+# === Setup ===
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 # Load vanilla CLIP model
@@ -18,23 +22,54 @@ vanilla_model.eval()
 # Load checkpoint model (can just be a separately loaded CLIP for demonstration)
 # If you have a fine-tuned checkpoint, load weights here
 checkpoint_model, checkpoint_preprocess = clip.load("ViT-B/32", device=device)
-checkpoint_model.load_state_dict(torch.load('/home/aarish/VLM-superstition-analysis/models/superstition_clip_final.pt')['model'])
-# checkpoint_model.load_state_dict(torch.load('/home/aarish/VLM-superstition-analysis/models/clip_fold1_best.pt')['model'])
+# checkpoint_model.load_state_dict(torch.load('/home/aarish/VLM-superstition-analysis/models/superstition_clip_final.pt')['model'])
+checkpoint_model.load_state_dict(torch.load('/home/aarish/VLM-superstition-analysis/models/clip_fold2_best.pt')['model'])
 checkpoint_model.eval()
 
+# === Helper functions ===
 def normalize(x: torch.Tensor) -> torch.Tensor:
     return x / x.norm(dim=-1, keepdim=True)
 
-def get_text_embedding(model, text: str) -> torch.Tensor:
+def get_text_embedding_checkpoint(text: str) -> torch.Tensor:
     tokens = clip.tokenize([text]).to(device)
     with torch.no_grad():
-        embedding = model.encode_text(tokens)
+        embedding = checkpoint_model.encode_text(tokens)
         return normalize(embedding)
 
-def get_image_embedding(model, preprocess, image_path: str) -> torch.Tensor | None:
+def get_text_embedding_vanilla(text: str) -> torch.Tensor:
+    tokens = clip.tokenize([text]).to(device)
+    with torch.no_grad():
+        embedding = vanilla_model.encode_text(tokens)
+        return normalize(embedding)
+
+def get_image_embedding_checkpoint(image_path: str) -> torch.Tensor | None:
     try:
         image = Image.open(image_path)
+        if image.mode == "L":
+            return None
+        if image.mode != "RGB":
+            image = image.convert("RGB")
 
+        # Check grayish
+        sampled_pixels = list(image.getdata())[::500]
+        threshold = 10
+        grayish = all(abs(r - g) < threshold and abs(g - b) < threshold and abs(r - b) < threshold
+                      for r, g, b in sampled_pixels)
+        if grayish:
+            return None
+
+        image_tensor = checkpoint_preprocess(image).unsqueeze(0).to(device)
+        with torch.no_grad():
+            embedding = checkpoint_model.encode_image(image_tensor)
+            return normalize(embedding)
+
+    except Exception as e:
+        print(f"Skipping {image_path}: {e}")
+        return None
+
+def get_image_embedding_vanilla(image_path: str) -> torch.Tensor | None:
+    try:
+        image = Image.open(image_path)
         if image.mode == "L":
             return None
         if image.mode != "RGB":
@@ -47,9 +82,9 @@ def get_image_embedding(model, preprocess, image_path: str) -> torch.Tensor | No
         if grayish:
             return None
 
-        image_tensor = preprocess(image).unsqueeze(0).to(device)
+        image_tensor = vanilla_preprocess(image).unsqueeze(0).to(device)
         with torch.no_grad():
-            embedding = model.encode_image(image_tensor)
+            embedding = vanilla_model.encode_image(image_tensor)
             return normalize(embedding)
 
     except Exception as e:
@@ -58,6 +93,7 @@ def get_image_embedding(model, preprocess, image_path: str) -> torch.Tensor | No
 
 def load_image_metadata(csv_path: str) -> pd.DataFrame:
     df = pd.read_csv(csv_path)
+    # Add image number column
     def get_image_number(path):
         try:
             filename = os.path.basename(path)
@@ -65,31 +101,30 @@ def load_image_metadata(csv_path: str) -> pd.DataFrame:
         except:
             return 0
     df['image_number'] = df['image_path'].apply(get_image_number)
-    df_filtered = df  # no filtering
-    print(f"Loaded {len(df_filtered)} images (filtered from {len(df)} total)")
-    return df_filtered
+    print(f"Loaded {len(df)} images")
+    return df
 
+# === Main comparison function ===
 def compare_and_plot_simplified(csv_path: str, output_csv: str):
     df = load_image_metadata(csv_path)
     
-    india_emb_checkpoint = get_text_embedding(checkpoint_model, "this is a face of an Indian")
-    india_emb_vanilla = get_text_embedding(vanilla_model, "this is a face of an Indian")
+    india_emb_checkpoint = get_text_embedding_checkpoint("this is a face of an Indian")
+    india_emb_vanilla = get_text_embedding_vanilla("this is a face of an Indian")
     
     checkpoint_embeddings = []
     vanilla_embeddings = []
     states = []
     checkpoint_similarities = []
     vanilla_similarities = []
-    difference_1 = []
-    difference_2 = []
+    difference = []
 
     print("Processing images with both models...")
-    for idx, row in tqdm(df.iterrows(), desc="Processing images", total=len(df)):
+    for idx, row in tqdm(df.iterrows(), total=len(df)):
         image_path = row['image_path']
         state = row['state']
         
-        checkpoint_emb = get_image_embedding(checkpoint_model, checkpoint_preprocess, image_path)
-        vanilla_emb = get_image_embedding(vanilla_model, vanilla_preprocess, image_path)
+        checkpoint_emb = get_image_embedding_checkpoint(image_path)
+        vanilla_emb = get_image_embedding_vanilla(image_path)
         
         if checkpoint_emb is not None and vanilla_emb is not None:
             checkpoint_sim = (checkpoint_emb @ india_emb_checkpoint.T).item()
@@ -100,8 +135,7 @@ def compare_and_plot_simplified(csv_path: str, output_csv: str):
             states.append(state)
             checkpoint_similarities.append(checkpoint_sim)
             vanilla_similarities.append(vanilla_sim)
-            difference_1.append(vanilla_emb.cpu().numpy())
-            difference_2.append(vanilla_emb.cpu().numpy())
+            difference.append(vanilla_sim - checkpoint_sim)
 
     # Convert to numpy arrays
     checkpoint_embeddings = np.vstack(checkpoint_embeddings)
@@ -109,17 +143,14 @@ def compare_and_plot_simplified(csv_path: str, output_csv: str):
     states = np.array(states)
     checkpoint_similarities = np.array(checkpoint_similarities)
     vanilla_similarities = np.array(vanilla_similarities)
-    difference_1 = np.array(difference_1)
-    difference_2 = np.array(difference_2)
+    difference = np.array(difference)
 
-    np.save("similarities_array1", difference_1)
-    np.save("similarities_array2", difference_2)
+    np.save("similarities_array", difference)
 
     print(f"Successfully processed {len(states)} images")
-    print(f"States found: {np.unique(states)}")
 
+    # === State-wise averages ===
     unique_states = np.unique(states)
-    
     checkpoint_avg_sim_per_state = {}
     checkpoint_sim_of_avg_emb_per_state = {}
     vanilla_avg_sim_per_state = {}
@@ -136,47 +167,75 @@ def compare_and_plot_simplified(csv_path: str, output_csv: str):
         vanilla_avg_sim_per_state[s] = vanilla_similarities[mask].mean()
         vanilla_sim_of_avg_emb_per_state[s] = (normalize(torch.tensor(vanilla_avg_emb, device=device)) @ india_emb_vanilla.T).item()
 
+    # Save CSV
     with open(output_csv, "w", newline="") as csvfile:
         writer = csv.writer(csvfile)
         writer.writerow(["state", "checkpoint_avg_similarity", "checkpoint_similarity_of_avg_embedding", 
                         "vanilla_avg_similarity", "vanilla_similarity_of_avg_embedding"])
         for s in unique_states:
             writer.writerow([s, f"{checkpoint_avg_sim_per_state[s]:.6f}", 
-                             f"{checkpoint_sim_of_avg_emb_per_state[s]:.6f}",
-                             f"{vanilla_avg_sim_per_state[s]:.6f}", 
-                             f"{vanilla_sim_of_avg_emb_per_state[s]:.6f}"])
+                           f"{checkpoint_sim_of_avg_emb_per_state[s]:.6f}",
+                           f"{vanilla_avg_sim_per_state[s]:.6f}", 
+                           f"{vanilla_sim_of_avg_emb_per_state[s]:.6f}"])
     print(f"✅ Saved state-wise summary to {output_csv}")
 
+    # === Bar plots ===
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
     x_pos = np.arange(len(unique_states))
     width = 0.35
-    
+
     checkpoint_avg_sims = [checkpoint_avg_sim_per_state[s] for s in unique_states]
     vanilla_avg_sims = [vanilla_avg_sim_per_state[s] for s in unique_states]
-    
     ax1.bar(x_pos - width/2, checkpoint_avg_sims, width, label='Checkpoint Model', alpha=0.7, color='blue')
     ax1.bar(x_pos + width/2, vanilla_avg_sims, width, label='Vanilla Model', alpha=0.7, color='orange')
-    ax1.set_xlabel('States')
-    ax1.set_ylabel('Average Similarity')
-    ax1.set_title('Average of Similarities to "an indian person"')
     ax1.set_xticks(x_pos)
     ax1.set_xticklabels(unique_states, rotation=45, ha='right')
+    ax1.set_title('Average of Similarities')
+    ax1.set_xlabel('States')
+    ax1.set_ylabel('Average Similarity')
     ax1.legend()
     ax1.grid(True, alpha=0.3)
-    
+
     checkpoint_sim_avgs = [checkpoint_sim_of_avg_emb_per_state[s] for s in unique_states]
     vanilla_sim_avgs = [vanilla_sim_of_avg_emb_per_state[s] for s in unique_states]
-    
     ax2.bar(x_pos - width/2, checkpoint_sim_avgs, width, label='Checkpoint Model', alpha=0.7, color='blue')
     ax2.bar(x_pos + width/2, vanilla_sim_avgs, width, label='Vanilla Model', alpha=0.7, color='orange')
-    ax2.set_xlabel('States')
-    ax2.set_ylabel('Similarity of Average Embedding')
-    ax2.set_title('Similarity of Average Embeddings to "an indian person"')
     ax2.set_xticks(x_pos)
     ax2.set_xticklabels(unique_states, rotation=45, ha='right')
+    ax2.set_title('Similarity of Average Embeddings')
+    ax2.set_xlabel('States')
+    ax2.set_ylabel('Similarity of Average Embedding')
     ax2.legend()
     ax2.grid(True, alpha=0.3)
-    
+    plt.tight_layout()
+    plt.show()
+
+    # === PCA + TSNE of embedding differences ===
+    diff_embeddings = vanilla_embeddings - checkpoint_embeddings
+
+    # PCA
+    pca = PCA(n_components=2)
+    diff_pca = pca.fit_transform(diff_embeddings)
+    plt.figure(figsize=(10, 6))
+    sns.scatterplot(x=diff_pca[:,0], y=diff_pca[:,1], hue=states, palette='tab20', s=60)
+    plt.title("PCA of Embedding Differences (Vanilla - Checkpoint)")
+    plt.xlabel("PC1")
+    plt.ylabel("PC2")
+    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.show()
+
+    # TSNE
+    tsne = TSNE(n_components=2, perplexity=30, random_state=42, init='pca')
+    diff_tsne = tsne.fit_transform(diff_embeddings)
+    plt.figure(figsize=(10, 6))
+    sns.scatterplot(x=diff_tsne[:,0], y=diff_tsne[:,1], hue=states, palette='tab20', s=60)
+    plt.title("TSNE of Embedding Differences (Vanilla - Checkpoint)")
+    plt.xlabel("TSNE1")
+    plt.ylabel("TSNE2")
+    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+    plt.grid(True, alpha=0.3)
     plt.tight_layout()
     plt.show()
 
@@ -185,9 +244,13 @@ def compare_and_plot_simplified(csv_path: str, output_csv: str):
         'vanilla_avg_sim_per_state': vanilla_avg_sim_per_state,
         'checkpoint_sim_of_avg_emb_per_state': checkpoint_sim_of_avg_emb_per_state,
         'vanilla_sim_of_avg_emb_per_state': vanilla_sim_of_avg_emb_per_state,
+        'diff_embeddings': diff_embeddings,
+        'diff_pca': diff_pca,
+        'diff_tsne': diff_tsne,
         'unique_states': unique_states
     }
 
+# === Run ===
 if __name__ == "__main__":
     csv_input = "/home/aarish/VLM-superstition-analysis/dataset_total.csv"
     output_csv = "dual_model_statewise_similarity.csv"
