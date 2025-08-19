@@ -10,7 +10,8 @@ import matplotlib.pyplot as plt
 
 # === 1. Setup ===
 dataset_root = "/kaggle/input/superstition-dataset/Big Data"  # ✅ Change if needed
-model_path = "fine_tuned_model.pt"  # ✅ Fine-tuned model path
+# model_path = "fine_tuned_model.pt"  # ✅ Fine-tuned model path
+model_path = '/home/aarish/VLM-superstition-analysis/models/superstition_clip_final.pt'
 output_base_dir = "fine_tuned_results"
 
 device = "cuda" if torch.cuda.is_available() else "cpu"

@@ -1,0 +1,4 @@
+models/
+fine_tuned*/
+*.csv
+*.npy
