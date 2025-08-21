@@ -57,17 +57,20 @@ misclassification_map = {
 df = pd.read_csv("/home/aarish/VLM-superstition-analysis/dataset_total.csv") 
 
 def create_prompt(state, gender):
+    state = state.replace("_", " ").title()
     return f"A photo of an Indian {gender} person from {state}."
 
 def create_stereotype_prompt(state, gender):
     opp_gender = "male" if gender == "female" else "male"
     if racial_bias[state] == 0: 
         country = misclassification_map[state]
+        state = state.replace("_", " ").title()
         return f"A photo of a {country} {gender}."
-    return f"A photo of a Non-Indian {gender}"
+    state = state.replace("_", " ").title()
+    return f"A photo of a foreign {gender}"
 
 def create_counterfactual_prompt(_, gender):
-    return f"A photo of an Non-Indian {gender}."
+    return f"A photo of a foreign {gender}."
 
 df["neutral_prompt"] = df.apply(lambda row: create_prompt(row['state'], row['gender']), axis=1)
 df["stereotype_prompt"] = df.apply(lambda row: create_stereotype_prompt(row['state'], row['gender']), axis=1)

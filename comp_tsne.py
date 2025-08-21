@@ -23,7 +23,7 @@ vanilla_model.eval()
 # If you have a fine-tuned checkpoint, load weights here
 checkpoint_model, checkpoint_preprocess = clip.load("ViT-B/32", device=device)
 # checkpoint_model.load_state_dict(torch.load('/home/aarish/VLM-superstition-analysis/models/superstition_clip_final.pt')['model'])
-checkpoint_model.load_state_dict(torch.load('/home/aarish/VLM-superstition-analysis/models/clip_fold2_best.pt')['model'])
+checkpoint_model.load_state_dict(torch.load('/home/aarish/VLM-superstition-analysis/models/clip_fold1_best.pt')['model'])
 checkpoint_model.eval()
 
 # === Helper functions ===
@@ -108,8 +108,8 @@ def load_image_metadata(csv_path: str) -> pd.DataFrame:
 def compare_and_plot_simplified(csv_path: str, output_csv: str):
     df = load_image_metadata(csv_path)
     
-    india_emb_checkpoint = get_text_embedding_checkpoint("this is a face of an Indian")
-    india_emb_vanilla = get_text_embedding_vanilla("this is a face of an Indian")
+    india_emb_checkpoint = get_text_embedding_checkpoint("An Indian")
+    india_emb_vanilla = get_text_embedding_vanilla("An Indian")
     
     checkpoint_embeddings = []
     vanilla_embeddings = []

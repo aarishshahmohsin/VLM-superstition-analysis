@@ -18,8 +18,8 @@ vanilla_model.eval()
 # Load checkpoint model (can just be a separately loaded CLIP for demonstration)
 # If you have a fine-tuned checkpoint, load weights here
 checkpoint_model, checkpoint_preprocess = clip.load("ViT-B/32", device=device)
-checkpoint_model.load_state_dict(torch.load('/home/aarish/VLM-superstition-analysis/models/superstition_clip_final.pt')['model'])
-# checkpoint_model.load_state_dict(torch.load('/home/aarish/VLM-superstition-analysis/models/clip_fold1_best.pt')['model'])
+# checkpoint_model.load_state_dict(torch.load('/home/aarish/VLM-superstition-analysis/models/superstition_clip_final.pt')['model'])
+checkpoint_model.load_state_dict(torch.load('/home/aarish/VLM-superstition-analysis/models/clip_fold1_best.pt')['model'])
 checkpoint_model.eval()
 
 def normalize(x: torch.Tensor) -> torch.Tensor:
@@ -72,8 +72,8 @@ def load_image_metadata(csv_path: str) -> pd.DataFrame:
 def compare_and_plot_simplified(csv_path: str, output_csv: str):
     df = load_image_metadata(csv_path)
     
-    india_emb_checkpoint = get_text_embedding(checkpoint_model, "this is a face of an Indian")
-    india_emb_vanilla = get_text_embedding(vanilla_model, "this is a face of an Indian")
+    india_emb_checkpoint = get_text_embedding(checkpoint_model, "An Indian")
+    india_emb_vanilla = get_text_embedding(vanilla_model, "An Indian")
     
     checkpoint_embeddings = []
     vanilla_embeddings = []
@@ -101,7 +101,7 @@ def compare_and_plot_simplified(csv_path: str, output_csv: str):
             checkpoint_similarities.append(checkpoint_sim)
             vanilla_similarities.append(vanilla_sim)
             difference_1.append(vanilla_emb.cpu().numpy())
-            difference_2.append(vanilla_emb.cpu().numpy())
+            difference_2.append(checkpoint_emb.cpu().numpy())
 
     # Convert to numpy arrays
     checkpoint_embeddings = np.vstack(checkpoint_embeddings)
@@ -114,6 +114,7 @@ def compare_and_plot_simplified(csv_path: str, output_csv: str):
 
     np.save("similarities_array1", difference_1)
     np.save("similarities_array2", difference_2)
+    np.save("states", states)
 
     print(f"Successfully processed {len(states)} images")
     print(f"States found: {np.unique(states)}")

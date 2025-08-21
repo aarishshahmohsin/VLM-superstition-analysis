@@ -8,6 +8,7 @@ from torch.utils.data import Dataset, DataLoader
 import torch.nn.functional as F
 import torch.nn as nn
 from tqdm import tqdm
+import json 
 
 # Optional: Enable Colab download
 try:
@@ -17,6 +18,34 @@ except ImportError:
     colab = False
 
 # ---------------------- Dataset ----------------------
+
+with open("./Labels.json", "r") as f:
+    IMAGENET_CLASS_NAMES = json.load(f)
+
+class NoisyLabelsDataset(Dataset):
+    def __init__(self, dataframe, preprocess, class_names):
+        self.df = dataframe.reset_index(drop=True)
+        self.transform = preprocess
+        self.class_names = class_names
+
+    def __len__(self):
+        return len(self.df)
+
+    def __getitem__(self, idx):
+        row = self.df.iloc[idx]
+        image_path = row["path"]
+        try:
+            image = self.transform(Image.open(image_path).convert("RGB"))
+        except Exception as e:
+            print(f"❌ Skipping unreadable image: {image_path} — {e}")
+            return None
+        synset = os.path.basename(os.path.dirname(image_path))
+        class_name = self.class_names.get(synset, synset)
+        return {
+            "image": image,
+            "class_name": class_name
+        }
+
 class SuperstitionBiasDataset(Dataset):
     def __init__(self, dataframe, preprocess):
         self.df = dataframe.reset_index(drop=True)
