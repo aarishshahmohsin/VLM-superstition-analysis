@@ -1,4 +1,5 @@
 import os
+import umap.umap_ as umap
 import torch
 import clip
 from PIL import Image
@@ -227,10 +228,22 @@ def compare_and_plot_simplified(csv_path: str, output_csv: str):
     plt.show()
 
     # TSNE
-    tsne = TSNE(n_components=2, perplexity=30, random_state=42, init='pca')
-    diff_tsne = tsne.fit_transform(diff_embeddings)
+    # tsne = TSNE(n_components=2, perplexity=30, random_state=42, init='pca')
+    # diff_tsne = tsne.fit_transform(diff_embeddings)
+    # plt.figure(figsize=(10, 6))
+    # sns.scatterplot(x=diff_tsne[:,0], y=diff_tsne[:,1], hue=states, palette='tab20', s=60)
+    # plt.title("TSNE of Embedding Differences (Vanilla - Checkpoint)")
+    # plt.xlabel("TSNE1")
+    # plt.ylabel("TSNE2")
+    # plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+    # plt.grid(True, alpha=0.3)
+    # plt.tight_layout()
+    # plt.show()
+
+    reducer = umap.UMAP(n_components=2, random_state=42)
+    diff_umap = reducer.fit_transform(diff_embeddings)
     plt.figure(figsize=(10, 6))
-    sns.scatterplot(x=diff_tsne[:,0], y=diff_tsne[:,1], hue=states, palette='tab20', s=60)
+    sns.scatterplot(x=diff_umap[:,0], y=diff_umap[:,1], hue=states, palette='tab20', s=60)
     plt.title("TSNE of Embedding Differences (Vanilla - Checkpoint)")
     plt.xlabel("TSNE1")
     plt.ylabel("TSNE2")
@@ -239,6 +252,7 @@ def compare_and_plot_simplified(csv_path: str, output_csv: str):
     plt.tight_layout()
     plt.show()
 
+
     return {
         'checkpoint_avg_sim_per_state': checkpoint_avg_sim_per_state,
         'vanilla_avg_sim_per_state': vanilla_avg_sim_per_state,
@@ -246,7 +260,7 @@ def compare_and_plot_simplified(csv_path: str, output_csv: str):
         'vanilla_sim_of_avg_emb_per_state': vanilla_sim_of_avg_emb_per_state,
         'diff_embeddings': diff_embeddings,
         'diff_pca': diff_pca,
-        'diff_tsne': diff_tsne,
+        # 'diff_tsne': diff_tsne,
         'unique_states': unique_states
     }
 
